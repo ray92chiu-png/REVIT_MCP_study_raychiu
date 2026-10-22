@@ -929,15 +929,73 @@ namespace RevitMCP.Core
         {
             Document doc = _uiApp.ActiveUIDocument.Document;
 
+            foreach (string key in new[] { "startX", "startY", "endX", "endY" })
+                if (parameters[key] == null || parameters[key].Type == JTokenType.Null)
+                    throw new ArgumentException($"缺少牆座標: {key}");
+
             double startX = parameters["startX"]?.Value<double>() ?? 0;
             double startY = parameters["startY"]?.Value<double>() ?? 0;
             double endX = parameters["endX"]?.Value<double>() ?? 0;
             double endY = parameters["endY"]?.Value<double>() ?? 0;
             double height = parameters["height"]?.Value<double>() ?? 3000;
 
-            // 轉換為英尺 (Revit 內部單位)
-            XYZ start = new XYZ(startX / 304.8, startY / 304.8, 0);
-            XYZ end = new XYZ(endX / 304.8, endY / 304.8, 0);
+            if (new[] { startX, startY, endX, endY, height }.Any(v => double.IsNaN(v) || double.IsInfinity(v)) || height <= 0)
+                throw new ArgumentException("牆座標必須為有限數值，高度必須大於零。");
+
+            // Never silently fall back to the first project level.
+            IdType? levelId = parameters["levelId"]?.Value<IdType>();
+            string levelName = parameters["levelName"]?.Value<string>();
+            Level level;
+            if (levelId.HasValue)
+            {
+                level = doc.GetElement(new ElementId(levelId.Value)) as Level;
+                if (level == null || (levelName != null && level.Name != levelName))
+                    throw new ArgumentException("指定的樓層 ID 無效或與樓層名稱不一致。");
+            }
+            else if (levelName != null)
+            {
+                var matches = new FilteredElementCollector(doc).OfClass(typeof(Level)).Cast<Level>()
+                    .Where(l => l.Name == levelName).ToList();
+                if (matches.Count != 1)
+                    throw new ArgumentException($"樓層名稱必須唯一且存在: {levelName}");
+                level = matches[0];
+            }
+            else
+            {
+                level = (doc.ActiveView as ViewPlan)?.GenLevel;
+                if (level == null)
+                    throw new ArgumentException("目前視圖沒有基準樓層；請指定 levelId 或 levelName。");
+            }
+
+            IdType? wallTypeId = parameters["wallTypeId"]?.Value<IdType>();
+            string wallTypeName = parameters["wallType"]?.Value<string>();
+            WallType wallType;
+            if (wallTypeId.HasValue)
+            {
+                wallType = doc.GetElement(new ElementId(wallTypeId.Value)) as WallType;
+                if (wallType == null || (wallTypeName != null && wallType.Name != wallTypeName))
+                    throw new ArgumentException("指定的牆類型 ID 無效或與類型名稱不一致。");
+            }
+            else if (wallTypeName != null)
+            {
+                var matches = new FilteredElementCollector(doc).OfClass(typeof(WallType)).Cast<WallType>()
+                    .Where(t => t.Name == wallTypeName && t.Kind == WallKind.Basic).ToList();
+                if (matches.Count != 1)
+                    throw new ArgumentException($"基本牆類型名稱必須唯一且存在: {wallTypeName}");
+                wallType = matches[0];
+            }
+            else
+            {
+                wallType = doc.GetElement(doc.GetDefaultElementTypeId(ElementTypeGroup.WallType)) as WallType;
+            }
+            if (wallType == null || wallType.Kind != WallKind.Basic)
+                throw new ArgumentException("請指定基本牆類型；此工具不建立帷幕牆或堆疊牆。");
+
+            // Model XY is in mm. The baseline is at the selected level, with zero base offset.
+            XYZ start = new XYZ(startX / 304.8, startY / 304.8, level.Elevation);
+            XYZ end = new XYZ(endX / 304.8, endY / 304.8, level.Elevation);
+            if (start.DistanceTo(end) <= _uiApp.Application.ShortCurveTolerance)
+                throw new ArgumentException("牆長度小於 Revit 最短曲線容許值。");
 
             using (Transaction trans = new Transaction(doc, "建立牆"))
             {
@@ -946,32 +1004,21 @@ namespace RevitMCP.Core
                 // 建立線
                 Line line = Line.CreateBound(start, end);
 
-                // 取得預設樓層
-                Level level = new FilteredElementCollector(doc)
-                    .OfClass(typeof(Level))
-                    .Cast<Level>()
-                    .FirstOrDefault();
+                Wall wall = Wall.Create(doc, line, wallType.Id, level.Id, height / 304.8, 0, false, false);
+                wall.get_Parameter(BuiltInParameter.WALL_KEY_REF_PARAM).Set(0); // Wall centerline
 
-                if (level == null)
-                {
-                    throw new Exception("找不到樓層");
-                }
-
-                // 建立牆
-                Wall wall = Wall.Create(doc, line, level.Id, false);
-                
-                // 設定高度
-                Parameter heightParam = wall.get_Parameter(BuiltInParameter.WALL_USER_HEIGHT_PARAM);
-                if (heightParam != null && !heightParam.IsReadOnly)
-                {
-                    heightParam.Set(height / 304.8);
-                }
-
-                trans.Commit();
+                if (trans.Commit() != TransactionStatus.Committed)
+                    throw new InvalidOperationException("建立牆未提交；請檢查 Revit 錯誤訊息，勿自動重試。");
 
                 return new
                 {
                     ElementId = wall.Id.GetIdValue(),
+                    LevelId = level.Id.GetIdValue(),
+                    LevelName = level.Name,
+                    WallTypeId = wallType.Id.GetIdValue(),
+                    WallTypeName = wallType.Name,
+                    BaseElevationMm = level.Elevation * 304.8,
+                    HeightMm = height,
                     Message = $"成功建立牆，ID: {wall.Id.GetIdValue()}"
                 };
             }

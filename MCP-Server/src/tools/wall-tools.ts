@@ -7,7 +7,7 @@ import { Tool } from "@modelcontextprotocol/sdk/types.js";
 export const wallTools: Tool[] = [
     {
         name: "create_wall",
-        description: "在 Revit 中建立一面牆。需要指定起點、終點座標和高度。",
+        description: "建立非結構直線牆，座標與高度為公釐。可明確指定樓層與基本牆類型；未指定樓層時使用目前平面視圖的樓層，無樓層則報錯。定位線為牆中心線、基準偏移為零。",
         inputSchema: {
             type: "object",
             properties: {
@@ -15,8 +15,11 @@ export const wallTools: Tool[] = [
                 startY: { type: "number", description: "起點 Y 座標（公釐）" },
                 endX: { type: "number", description: "終點 X 座標（公釐）" },
                 endY: { type: "number", description: "終點 Y 座標（公釐）" },
-                height: { type: "number", description: "牆高度（公釐）", default: 3000 },
-                wallType: { type: "string", description: "牆類型名稱（選填）" },
+                height: { type: "number", exclusiveMinimum: 0, description: "牆不連續高度（公釐）", default: 3000 },
+                levelId: { type: "integer", minimum: 1, description: "基準樓層 ID（選填；與 levelName 同時提供時必須一致）" },
+                levelName: { type: "string", minLength: 1, description: "基準樓層完整名稱（選填）" },
+                wallTypeId: { type: "integer", minimum: 1, description: "基本牆類型 ID（選填；與 wallType 同時提供時必須一致）" },
+                wallType: { type: "string", minLength: 1, description: "基本牆類型完整名稱（選填；找不到或重名時報錯）" },
             },
             required: ["startX", "startY", "endX", "endY"],
         },
